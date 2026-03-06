@@ -7,12 +7,14 @@
 #include <thread>
 #include <functional>
 
+#include "SBSObjects.h"
+
 struct JobMessage {
 
 	uint64_t job_id = 0;
 	std::string payload;
 	std::chrono::steady_clock::time_point timestamp;
-
+	AircraftUpdate update;
 };
 
 class SharedQueue {

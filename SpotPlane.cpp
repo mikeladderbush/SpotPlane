@@ -12,7 +12,7 @@
 #define WM_CLIENT_UPDATE (WM_APP + 1)
 
 #pragma comment (lib, "Ws2_32.lib")
-#pragma comment (lib, "Mswsock.lib")
+#pragma comment (lib, "Mswsock.lib") 
 #pragma comment (lib, "AdvApi32.lib")
 
 // Global Variables:
@@ -24,6 +24,9 @@ HWND gMainWnd = NULL;
 std::atomic<int> gServerCount = 0;
 std::atomic<int> gjob_id = 0;
 
+std::vector<std::string> gPayloadList;
+std::mutex gPayloadMutex;
+
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
@@ -32,6 +35,7 @@ INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK    SpawnClient(HWND, UINT, WPARAM, LPARAM);
 bool                InitializeWSA(WSADATA*);
 DWORD WINAPI        ServerSocketInit(LPVOID);
+
 
 struct ServerContext {
     SharedQueue* queue;
@@ -154,6 +158,8 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
         return FALSE;
     }
 
+    // TODO: ListView table 
+    
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
 
@@ -196,6 +202,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
         // TODO: Add any drawing code that uses hdc here...
+        std::string payload_text;
+        {
+            std::lock_guard<std::mutex> lock(gPayloadMutex);
+            payload_text = gPayloadList.front();
+        }
+        int size = MultiByteToWideChar(CP_UTF8, 0, payload_text.c_str(), -1, NULL, 0);
+        std::wstring wide(size, 0);
+        MultiByteToWideChar(CP_UTF8, 0, payload_text.c_str(), -1, &wide[0], size);
+        TextOut(hdc, 10, 30, wide.c_str(), wide.size());
+
 
         if (gServerCount > 0) {
             TextOut(hdc, 10, 10, L"Server started", 15);
@@ -207,7 +223,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         PostQuitMessage(0);
         break;
     case WM_CLIENT_UPDATE:
-        InvalidateRect(hWnd, NULL, TRUE);
+        // TODO: fix casting to use the AircraftUpdate struct to make use of data fields.
+        std::string* payload = (std::string*)lParam;
+        {
+            std::lock_guard<std::mutex> lock(gPayloadMutex);
+            gPayloadList.push_back(*payload);
+        }
+        delete payload;
+        InvalidateRect(hWnd, NULL, 0);
         return 0;
     default:
         return DefWindowProc(hWnd, message, wParam, lParam);
@@ -255,6 +278,7 @@ DWORD WINAPI HandleClient(LPVOID lpParam) {
         if (iResult > 0) {
             JobMessage job;
             job.payload = std::string(recvbuf, iResult);
+            // TODO: need to break down the payload here for the update struct.
             job.timestamp = std::chrono::steady_clock::now();
             job.job_id = gjob_id;
 
