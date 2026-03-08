@@ -126,11 +126,13 @@
   <ItemGroup>
     <ClInclude Include="framework.h" />
     <ClInclude Include="Resource.h" />
+    <ClInclude Include="SBSObjects.h" />
     <ClInclude Include="SpotPlane.h" />
     <ClInclude Include="targetver.h" />
     <ClInclude Include="threadpool.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="SBSObjects.cpp" />
     <ClCompile Include="SpotPlane.cpp" />
   </ItemGroup>
   <ItemGroup>

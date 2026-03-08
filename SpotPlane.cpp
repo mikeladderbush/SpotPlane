@@ -4,6 +4,7 @@
 #include "framework.h"
 #include "SpotPlane.h"
 #include "threadpool.h"
+#include "SBSObjects.h"
 #include <atomic>
 
 #define MAX_LOADSTRING 100
@@ -64,7 +65,9 @@ int CALLBACK wWinMain(_In_ HINSTANCE hInstance,
     SharedQueue* queue = new SharedQueue();
     Thread_pool* pool = new Thread_pool(*queue, 10, [](const JobMessage& job) {
         std::string* payload = new std::string(job.payload);
-        PostMessage(gMainWnd, WM_CLIENT_UPDATE, 0, (LPARAM)payload);
+        AircraftUpdate update = ParseSBS(*payload);
+        AircraftUpdate* h_update = new AircraftUpdate(update);
+        PostMessage(gMainWnd, WM_CLIENT_UPDATE, 0, (LPARAM)h_update);
         });
     server_ctx->pool = pool;
     server_ctx->queue = queue;
@@ -223,7 +226,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         PostQuitMessage(0);
         break;
     case WM_CLIENT_UPDATE:
-        // TODO: fix casting to use the AircraftUpdate struct to make use of data fields.
+    {
         std::string* payload = (std::string*)lParam;
         {
             std::lock_guard<std::mutex> lock(gPayloadMutex);
@@ -232,6 +235,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         delete payload;
         InvalidateRect(hWnd, NULL, 0);
         return 0;
+    }
     default:
         return DefWindowProc(hWnd, message, wParam, lParam);
     }
@@ -271,19 +275,26 @@ DWORD WINAPI HandleClient(LPVOID lpParam) {
     int iResult;
     char recvbuf[DEFAULT_BUFLEN];
     int recvbuflen = DEFAULT_BUFLEN;
+    std::string line_buffer;
 
     do {
         iResult = recv(client_ctx->socket, recvbuf, recvbuflen, 0);
 
         if (iResult > 0) {
-            JobMessage job;
-            job.payload = std::string(recvbuf, iResult);
-            // TODO: need to break down the payload here for the update struct.
-            job.timestamp = std::chrono::steady_clock::now();
-            job.job_id = gjob_id;
-
-            gjob_id++;
-            client_ctx->queue->enqueue_job(job);
+            line_buffer.append(recvbuf, iResult);
+            size_t newline;
+            while ((newline = line_buffer.find('\n')) != std::string::npos) {
+                std::string line = line_buffer.substr(0, newline);
+                line_buffer.erase(0, newline + 1);
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                JobMessage job;
+                job.payload = line;
+                job.timestamp = std::chrono::steady_clock::now();
+                job.job_id = gjob_id++;
+                client_ctx->queue->enqueue_job(job);
+            }
 
             printf("Bytes received: %d\n", iResult);
         }

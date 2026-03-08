@@ -30,9 +30,15 @@
     <ClInclude Include="threadpool.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="SBSObjects.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SpotPlane.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SBSObjects.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
