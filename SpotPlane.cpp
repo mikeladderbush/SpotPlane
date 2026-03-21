@@ -22,30 +22,24 @@ WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
 WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 
 HWND gMainWnd = NULL;
-std::atomic<int> gServerCount = 0;
+std::atomic<int> gManagerCount = 0;
 std::atomic<int> gjob_id = 0;
 
-std::vector<std::string> gPayloadList;
-std::mutex gPayloadMutex;
+std::vector<AircraftUpdate> gUpdateList;
+std::mutex gUpdateMutex;
 
 // Forward declarations of functions included in this code module:
 ATOM                MyRegisterClass(HINSTANCE hInstance);
 BOOL                InitInstance(HINSTANCE, int);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
-INT_PTR CALLBACK    SpawnClient(HWND, UINT, WPARAM, LPARAM);
 bool                InitializeWSA(WSADATA*);
-DWORD WINAPI        ServerSocketInit(LPVOID);
+DWORD WINAPI        ThreadManager(LPVOID);
 
 
-struct ServerContext {
+struct ManagerContext {
     SharedQueue* queue;
     Thread_pool* pool;
-};
-
-struct ClientContext {
-    SOCKET socket;
-    SharedQueue* queue;
 };
 
 int CALLBACK wWinMain(_In_ HINSTANCE hInstance,
@@ -61,18 +55,17 @@ int CALLBACK wWinMain(_In_ HINSTANCE hInstance,
         return 1;
     }
 
-    ServerContext* server_ctx = new ServerContext();
+    ManagerContext* manager_ctx = new ManagerContext();
     SharedQueue* queue = new SharedQueue();
     Thread_pool* pool = new Thread_pool(*queue, 10, [](const JobMessage& job) {
-        std::string* payload = new std::string(job.payload);
-        AircraftUpdate update = ParseSBS(*payload);
-        AircraftUpdate* h_update = new AircraftUpdate(update);
+        std::string payload(job.payload);
+        AircraftUpdate* h_update = new AircraftUpdate(ParseSBS(payload));
         PostMessage(gMainWnd, WM_CLIENT_UPDATE, 0, (LPARAM)h_update);
         });
-    server_ctx->pool = pool;
-    server_ctx->queue = queue;
+    manager_ctx->pool = pool;
+    manager_ctx->queue = queue;
 
-    HANDLE ServerHandle = CreateThread(NULL, 0, ServerSocketInit, server_ctx, 0, NULL);
+    HANDLE Manager = CreateThread(NULL, 0, ThreadManager, manager_ctx, 0, NULL);
 
     // Initialize global strings
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
@@ -103,9 +96,9 @@ int CALLBACK wWinMain(_In_ HINSTANCE hInstance,
 
     delete pool;
     delete queue;
-    delete server_ctx;
+    delete manager_ctx;
 
-    CloseHandle(ServerHandle);
+    CloseHandle(Manager);
 
     return (int)msg.wParam;
 }
@@ -205,18 +198,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
         // TODO: Add any drawing code that uses hdc here...
-        std::string payload_text;
+        AircraftUpdate h_update;
         {
-            std::lock_guard<std::mutex> lock(gPayloadMutex);
-            payload_text = gPayloadList.front();
+            std::lock_guard<std::mutex> lock(gUpdateMutex);
+            if (gUpdateList.size() > 0) {
+                h_update = gUpdateList.front();
+            }
         }
-        int size = MultiByteToWideChar(CP_UTF8, 0, payload_text.c_str(), -1, NULL, 0);
+        int size = MultiByteToWideChar(CP_UTF8, 0, h_update.AircraftID.c_str(), -1, NULL, 0);
         std::wstring wide(size, 0);
-        MultiByteToWideChar(CP_UTF8, 0, payload_text.c_str(), -1, &wide[0], size);
+        MultiByteToWideChar(CP_UTF8, 0, h_update.AircraftID.c_str(), -1, &wide[0], size);
         TextOut(hdc, 10, 30, wide.c_str(), wide.size());
 
 
-        if (gServerCount > 0) {
+        if (gManagerCount > 0) {
             TextOut(hdc, 10, 10, L"Server started", 15);
         }
         EndPaint(hWnd, &ps);
@@ -227,12 +222,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         break;
     case WM_CLIENT_UPDATE:
     {
-        std::string* payload = (std::string*)lParam;
+        AircraftUpdate* h_update = (AircraftUpdate*)lParam;
         {
-            std::lock_guard<std::mutex> lock(gPayloadMutex);
-            gPayloadList.push_back(*payload);
+            std::lock_guard<std::mutex> lock(gUpdateMutex);
+            gUpdateList.push_back(*h_update);
         }
-        delete payload;
+        delete h_update;
         InvalidateRect(hWnd, NULL, 0);
         return 0;
     }
@@ -268,9 +263,18 @@ bool InitializeWSA(WSADATA* data) {
 
 }
 
-DWORD WINAPI HandleClient(LPVOID lpParam) {
+DWORD WINAPI ThreadManager(LPVOID lpParam)
+{
+    ManagerContext* manager_ctx = (ManagerContext*)lpParam;
+    gManagerCount++;
 
-    ClientContext* client_ctx = (ClientContext*)lpParam;
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = { 0 };
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(30003);
+    inet_pton(AF_INET, "192.168.x.x", &addr.sin_addr);
+
+    connect(sock, (struct sockaddr*)&addr, sizeof(addr));
 
     int iResult;
     char recvbuf[DEFAULT_BUFLEN];
@@ -278,7 +282,7 @@ DWORD WINAPI HandleClient(LPVOID lpParam) {
     std::string line_buffer;
 
     do {
-        iResult = recv(client_ctx->socket, recvbuf, recvbuflen, 0);
+        iResult = recv(sock, recvbuf, recvbuflen, 0);
 
         if (iResult > 0) {
             line_buffer.append(recvbuf, iResult);
@@ -293,93 +297,12 @@ DWORD WINAPI HandleClient(LPVOID lpParam) {
                 job.payload = line;
                 job.timestamp = std::chrono::steady_clock::now();
                 job.job_id = gjob_id++;
-                client_ctx->queue->enqueue_job(job);
+                manager_ctx->queue->enqueue_job(job);
             }
-
-            printf("Bytes received: %d\n", iResult);
-        }
-        else if (iResult == 0) {
-            printf("Connection closed\n");
-        }
-        else {
-            printf("recv failed with error: %d\n", WSAGetLastError());
         }
     } while (iResult > 0);
 
-
-
-    delete client_ctx;
+    closesocket(sock);
+    gManagerCount--;
     return 0;
-}
-
-
-DWORD WINAPI ServerSocketInit(LPVOID lpParam)
-{
-    int iResult;
-
-    ServerContext* server_ctx = (ServerContext*)lpParam;
-
-    SOCKET ListenSocket = INVALID_SOCKET;
-    SOCKET ClientSocket = INVALID_SOCKET;
-
-    struct addrinfo* result = NULL;
-    struct addrinfo hints;
-
-    ZeroMemory(&hints, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-    hints.ai_flags = AI_PASSIVE;
-
-    iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
-    if (iResult != 0) {
-        printf("getaddrinfo failed with error: %d\n", iResult);
-        return 1;
-    }
-
-    ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-    if (ListenSocket == INVALID_SOCKET) {
-        printf("Socket failed with error: %ld\n", WSAGetLastError());
-        freeaddrinfo(result);
-        return 1;
-    }
-
-    iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
-    if (iResult == SOCKET_ERROR) {
-        printf("Bind failed with error: %ld\n", WSAGetLastError());
-        freeaddrinfo(result);
-        closesocket(ListenSocket);
-        return 1;
-    }
-
-    freeaddrinfo(result);
-
-    iResult = listen(ListenSocket, SOMAXCONN);
-    if (iResult == SOCKET_ERROR) {
-        printf("Listen failed with error: %d\n", WSAGetLastError());
-        closesocket(ListenSocket);
-        return 1;
-    }
-
-    gServerCount++;
-
-    while (true) {
-        ClientSocket = accept(ListenSocket, NULL, NULL);
-        ClientContext* client_ctx = new ClientContext();
-        client_ctx->queue = server_ctx->queue;
-        client_ctx->socket = ClientSocket;
-        HANDLE client_handler = CreateThread(NULL, 0, HandleClient, client_ctx, 0, NULL);
-    }
-
-    iResult = shutdown(ClientSocket, SD_SEND);
-    if (iResult == SOCKET_ERROR) {
-        printf("Shutdown failed with error: %d\n", WSAGetLastError());
-        closesocket(ClientSocket);
-        return 1;
-    }
-
-    closesocket(ClientSocket);
-
-    return 0;
-
 }
